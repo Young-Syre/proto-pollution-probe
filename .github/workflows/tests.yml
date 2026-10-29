@@ -1,0 +1,205 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      # Everything below runs the built CLI exactly as a user would, from the
+      # repository root, so the assertions cover argument parsing, path display and
+      # exit codes as well as the analyser.
+
+      - name: CLI reports the vulnerable fixtures
+        run: |
+          set +e
+          node dist/src/cli.js --no-color test/fixtures/vulnerable > out.txt
+          status=$?
+          set -e
+          cat out.txt
+          test "$status" -eq 1 || { echo "expected exit 1, got $status"; exit 1; }
+          for rule in PP-S01 PP-S02 PP-S03 PP-S04 PP-S05 PP-G01 PP-G02 PP-G03 PP-G04 PP-C01; do
+            grep -q "$rule" out.txt || { echo "missing $rule"; exit 1; }
+          done
+
+      - name: CLI reports the note-level rules only when asked
+        run: |
+          node dist/src/cli.js --no-color -s note test/fixtures/vulnerable > notes.txt || true
+          grep -q 'PP-S07' notes.txt || { echo 'PP-S07 missing at note level'; exit 1; }
+          grep -q 'PP-S06' notes.txt || { echo 'PP-S06 missing at note level'; exit 1; }
+          grep -q 'PP-G05' notes.txt || { echo 'PP-G05 missing at note level'; exit 1; }
+
+      - name: CLI finds the guarded fixtures clean
+        run: |
+          node dist/src/cli.js --no-color test/fixtures/guarded > guarded.txt
+          cat guarded.txt
+          grep -q 'no findings' guarded.txt || { echo 'a guarded fixture produced a finding'; exit 1; }
+
+      - name: CLI reports the weak-guard fixtures with their guard quality
+        run: |
+          set +e
+          node dist/src/cli.js --no-color test/fixtures/weak > weak.txt
+          status=$?
+          set -e
+          cat weak.txt
+          test "$status" -eq 1 || { echo "expected exit 1, got $status"; exit 1; }
+          grep -q 'PP-Q01' weak.txt || { echo 'missing PP-Q01'; exit 1; }
+          grep -q 'own-property filter guards it' weak.txt || { echo 'missing the own-property-filter explanation'; exit 1; }
+
+      - name: CLI output contains no absolute paths
+        run: |
+          node dist/src/cli.js --no-color test/fixtures/vulnerable > paths.txt || true
+          if grep -qE '(^|[^a-zA-Z0-9_])/(home|Users|root)/' paths.txt; then
+            echo 'absolute path leaked into output'; exit 1
+          fi
+
+      - name: Exit code 2 on bad usage
+        run: |
+          set +e
+          node dist/src/cli.js --not-a-flag test/fixtures >/dev/null 2>&1
+          test $? -eq 2 || { echo 'expected exit 2'; exit 1; }
+          node dist/src/cli.js >/dev/null 2>&1
+          test $? -eq 2 || { echo 'expected exit 2 with no path'; exit 1; }
+
+      - name: Exit code 3 with --strict-files
+        run: |
+          set +e
+          node dist/src/cli.js --no-color --strict-files test/fixtures/modern >/dev/null
+          test $? -eq 3 || { echo 'expected exit 3'; exit 1; }
+
+      - name: SARIF output matches the 2.1.0 shape
+        run: |
+          node dist/src/cli.js --format sarif --output report.sarif test/fixtures/vulnerable || true
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const log = JSON.parse(readFileSync("report.sarif", "utf8"));
+            const fail = (message) => { console.error("SARIF: " + message); process.exit(1); };
+
+            if (log.version !== "2.1.0") fail("version is " + log.version);
+            if (!String(log.$schema).includes("sarif-schema-2.1.0")) fail("missing 2.1.0 $schema");
+            if (!Array.isArray(log.runs) || log.runs.length !== 1) fail("expected exactly one run");
+
+            const run = log.runs[0];
+            const driver = run.tool && run.tool.driver;
+            if (!driver || driver.name !== "proto-pollution-probe") fail("bad tool.driver");
+            if (!/^\d+\.\d+\.\d+$/.test(driver.version)) fail("bad driver version");
+            if (!Array.isArray(driver.rules) || driver.rules.length === 0) fail("no rules declared");
+
+            for (const rule of driver.rules) {
+              if (typeof rule.id !== "string") fail("rule without an id");
+              if (!rule.shortDescription || typeof rule.shortDescription.text !== "string") {
+                fail(rule.id + " has no shortDescription.text");
+              }
+              if (!rule.fullDescription || typeof rule.fullDescription.text !== "string") {
+                fail(rule.id + " has no fullDescription.text");
+              }
+              if (!["error", "warning", "note"].includes(rule.defaultConfiguration.level)) {
+                fail(rule.id + " has level " + rule.defaultConfiguration.level);
+              }
+            }
+
+            if (!Array.isArray(run.results) || run.results.length === 0) fail("no results");
+            const ids = driver.rules.map((rule) => rule.id);
+            for (const result of run.results) {
+              if (!ids.includes(result.ruleId)) fail(result.ruleId + " is not declared");
+              if (ids[result.ruleIndex] !== result.ruleId) fail("ruleIndex does not match ruleId");
+              if (!["error", "warning", "note"].includes(result.level)) fail("bad level " + result.level);
+              if (!result.message || typeof result.message.text !== "string") fail("result without a message");
+              const location = result.locations && result.locations[0];
+              const physical = location && location.physicalLocation;
+              if (!physical || typeof physical.artifactLocation.uri !== "string") fail("result without a location");
+              const uri = physical.artifactLocation.uri;
+              if (uri.startsWith("/") || /^[A-Za-z]:/.test(uri)) fail("absolute artifact uri: " + uri);
+              const region = physical.region;
+              if (!(region.startLine >= 1) || !(region.startColumn >= 1)) fail("bad region in " + uri);
+              if (!(region.endLine >= region.startLine)) fail("endLine before startLine in " + uri);
+              if (typeof region.snippet.text !== "string") fail("region without a snippet");
+              const fingerprint = result.partialFingerprints["protoPollutionProbe/v1"];
+              if (!/^[0-9a-f]{16}$/.test(fingerprint)) fail("bad fingerprint " + fingerprint);
+            }
+
+            const invocation = run.invocations[0];
+            if (invocation.executionSuccessful !== true) fail("invocation not successful");
+            console.log("SARIF 2.1.0 shape OK: " + run.results.length + " results, " + driver.rules.length + " rules");
+          '
+
+      - name: SARIF notifications carry the skipped files
+        run: |
+          node dist/src/cli.js --format sarif --output skipped.sarif test/fixtures/modern || true
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const log = JSON.parse(readFileSync("skipped.sarif", "utf8"));
+            const notifications = log.runs[0].invocations[0].toolExecutionNotifications;
+            if (!Array.isArray(notifications) || notifications.length === 0) {
+              console.error("expected toolExecutionNotifications for the skipped fixtures");
+              process.exit(1);
+            }
+            for (const notification of notifications) {
+              if (!/^PP-E0\d$/.test(notification.descriptor.id)) {
+                console.error("bad notification id " + notification.descriptor.id);
+                process.exit(1);
+              }
+            }
+            console.log("notifications OK: " + notifications.map((n) => n.descriptor.id).join(", "));
+          '
+
+      - name: Corpus mode runs, counts every rule and exits 0
+        run: |
+          node dist/src/cli.js --corpus test/fixtures --format json > corpus.json
+          test $? -eq 0 || { echo 'corpus mode should exit 0'; exit 1; }
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const report = JSON.parse(readFileSync("corpus.json", "utf8"));
+            if (!(report.filesDiscovered > report.filesScanned)) {
+              console.error("the deliberately broken fixtures should be discovered but not scanned");
+              process.exit(1);
+            }
+            if (report.byRule.length < 19) {
+              console.error("expected every rule in the corpus table, got " + report.byRule.length);
+              process.exit(1);
+            }
+            if (!report.byRule.some((rule) => rule.id === "PP-S01" && rule.count > 0)) {
+              console.error("PP-S01 should fire on the fixtures");
+              process.exit(1);
+            }
+            console.log("corpus OK: " + report.filesScanned + " files, " + report.byRule.filter((r) => r.count > 0).length + " rules fired");
+          '
+
+      - name: The rules table in the README matches the code
+        run: node scripts/rules-table.mjs --check
+
+      - name: No absolute paths or personal identifiers in the repository
+        run: |
+          if grep -rIEn '/(home|Users)/[a-z]' --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist . ; then
+            echo 'absolute home path committed'; exit 1
+          fi
+          if grep -rIEn 'AKIA[0-9A-Z]{16}|sk_(live|test)_[0-9A-Za-z]{20}|ghp_[0-9A-Za-z]{36}|BEGIN [A-Z ]*PRIVATE KEY' --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist . ; then
+            echo 'secret-shaped literal committed'; exit 1
+          fi
