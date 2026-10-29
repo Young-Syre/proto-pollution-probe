@@ -1,0 +1,63 @@
+{
+  "name": "proto-pollution-probe",
+  "version": "0.1.0",
+  "description": "Static analyser that finds prototype-pollution sinks and the gadgets that make them exploitable, and pairs the two into a reported chain.",
+  "license": "MIT",
+  "author": "David Nichols",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "proto-pollution-probe": "dist/src/cli.js",
+    "ppp": "dist/src/cli.js"
+  },
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "files": [
+    "dist/src",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Young-Syre/proto-pollution-probe.git"
+  },
+  "homepage": "https://github.com/Young-Syre/proto-pollution-probe#readme",
+  "bugs": {
+    "url": "https://github.com/Young-Syre/proto-pollution-probe/issues"
+  },
+  "keywords": [
+    "prototype-pollution",
+    "static-analysis",
+    "sast",
+    "sarif",
+    "appsec",
+    "javascript",
+    "typescript",
+    "cwe-1321",
+    "acorn"
+  ],
+  "scripts": {
+    "build": "tsc --build tsconfig.json && chmod +x dist/src/cli.js",
+    "clean": "rm -rf dist",
+    "prepack": "npm run clean && npm run build",
+    "test": "npm run build && node --test \"dist/test/*.test.js\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "corpus": "node dist/src/cli.js --corpus test/fixtures"
+  },
+  "dependencies": {
+    "acorn": "8.19.0",
+    "acorn-walk": "8.3.5"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3"
+  }
+}
