@@ -8,7 +8,7 @@ A static analyser for prototype-pollution **sinks**, **gadgets**, and the **chai
 between them. No network, no execution of the analysed code, two runtime dependencies
 (`acorn` and `acorn-walk`), SARIF 2.1.0 output.
 
-## Why this bug class exists
+## A sink is only half a bug
 
 JavaScript has no private fields on a plain object and no distinction, at the point of
 assignment, between "a key the program chose" and "a key that arrived in a request body".
