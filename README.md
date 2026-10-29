@@ -267,7 +267,7 @@ to be taken on trust.
 ### On the labelled fixtures
 
 `test/fixtures/` contains paired vulnerable and guarded versions of every sink. The test
-suite asserts both directions: 139 tests and 389 assertions, run with `node --test`.
+suite asserts both directions: 142 tests and 400 assertions, run with `node --test`.
 
 ```
 npm ci && npm test
