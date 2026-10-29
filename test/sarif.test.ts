@@ -4,6 +4,12 @@ import { RULES, rule } from '../src/rules.js';
 import { SARIF_SCHEMA, SARIF_VERSION, renderSarif, sarifLevelFor, securitySeverityFor } from '../src/sarif.js';
 import { renderJson, renderText } from '../src/report.js';
 import { SEVERITIES } from '../src/types.js';
+import { scanBase } from '../src/discover.js';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { scanFixtureDir } from './helpers.js';
 
 const result = scanFixtureDir('vulnerable');
@@ -82,12 +88,83 @@ test('ruleIndex points at the matching declared rule', () => {
 });
 
 test('artifact URIs are relative and carry no absolute path', () => {
-  for (const entry of log['runs'][0].results) {
-    const uri = entry.locations[0].physicalLocation.artifactLocation.uri;
+  // Every location kind, not only the primary one: relatedLocations go through
+  // the same call and were never asserted.
+  const assertRelative = (uri: string): void => {
     assert.equal(uri.startsWith('/'), false, `absolute path leaked: ${uri}`);
     assert.equal(/^[A-Za-z]:/.test(uri), false, `drive letter leaked: ${uri}`);
     assert.equal(uri.includes('\\'), false, 'URIs use forward slashes');
+  };
+  let seen = 0;
+  for (const entry of log['runs'][0].results) {
+    assertRelative(entry.locations[0].physicalLocation.artifactLocation.uri);
+    seen += 1;
+    for (const related of entry.relatedLocations ?? []) {
+      assertRelative(related.physicalLocation.artifactLocation.uri);
+      seen += 1;
+    }
   }
+  assert.ok(seen > 0, 'the fixture produced locations to check');
+});
+
+test('a scan outside the working directory still reports relative paths', () => {
+  // This assertion used to be vacuous. The fixtures are passed as paths
+  // relative to the repo root, so `relative(cwd, path)` never started with
+  // `..` and displayPath's absolute-path fallback was never reached -- while a
+  // real scan of an absolute path outside the working directory emitted the
+  // machine's directory layout into a SARIF file bound for a pull request.
+  const root = resolve(fileURLToPath(new URL('..', import.meta.url)), '..');
+  const target = join(root, 'test', 'fixtures', 'vulnerable');
+  const outside = mkdtempSync(join(tmpdir(), 'ppp-outside-'));
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [join(root, 'dist', 'src', 'cli.js'), '--format', 'sarif', target],
+      { cwd: outside, encoding: 'utf8' },
+    );
+    assert.equal(result.status, 1, result.stderr);
+    const parsed = JSON.parse(result.stdout) as typeof log;
+    const uris = new Set<string>();
+    for (const entry of parsed['runs'][0].results) {
+      uris.add(entry.locations[0].physicalLocation.artifactLocation.uri);
+      for (const related of entry.relatedLocations ?? []) {
+        uris.add(related.physicalLocation.artifactLocation.uri);
+      }
+    }
+    assert.ok(uris.size > 0, 'the scan produced results');
+    for (const uri of uris) {
+      assert.equal(uri.startsWith('/'), false, `absolute path leaked: ${uri}`);
+      assert.ok(!uri.includes(root), `the scanning machine's layout leaked: ${uri}`);
+    }
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('the text format is relative outside the working directory too', () => {
+  const root = resolve(fileURLToPath(new URL('..', import.meta.url)), '..');
+  const target = join(root, 'test', 'fixtures', 'vulnerable', 'chain.js');
+  const outside = mkdtempSync(join(tmpdir(), 'ppp-outside-text-'));
+  try {
+    const result = spawnSync(process.execPath, [join(root, 'dist', 'src', 'cli.js'), target], {
+      cwd: outside,
+      encoding: 'utf8',
+    });
+    assert.ok(!result.stdout.includes(root), `layout leaked: ${result.stdout.slice(0, 200)}`);
+    assert.ok(result.stdout.includes('chain.js'));
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('scanBase keeps the working directory when every path is inside it', () => {
+  // The ordinary case must not change: `probe src` still reports `src/a.js`.
+  const cwd = '/work/project';
+  assert.equal(scanBase(['src'], cwd), cwd);
+  assert.equal(scanBase(['src', 'lib'], cwd), cwd);
+  // A path outside it falls back to the common ancestor rather than absolute.
+  assert.equal(scanBase(['/elsewhere/a/one.js', '/elsewhere/a/two.js'], cwd), '/elsewhere/a');
+  assert.equal(scanBase(['/elsewhere/a/x.js', '/elsewhere/b/y.js'], cwd), '/elsewhere');
 });
 
 test('partial fingerprints are present and versioned', () => {

@@ -428,8 +428,13 @@ the counts, which is what you need to triage a sample and get your own figure.
   moves above it.
 - Chain findings use `relatedLocations` to carry the other half, each with an `id` and a
   message.
-- `artifactLocation.uri` is always relative to the scan root, with forward slashes. CI
-  asserts that no absolute path reaches the output.
+- `artifactLocation.uri` is always relative to the scan root, with forward slashes, in
+  results and in `relatedLocations` alike. The scan root is the working directory when
+  every scanned path is inside it — so `probe src` keeps reporting `src/a.js` — and the
+  common ancestor of the scanned paths when they are not, which is what stops an
+  absolute path reaching a SARIF file bound for a pull request. CI asserts it from a
+  different working directory, against an absolute target, because an assertion that
+  only ever sees relative inputs cannot fail.
 - Skipped files become `invocations[0].toolExecutionNotifications`, not results: a file
   that could not be parsed is a fact about the run, not a finding about the code.
 

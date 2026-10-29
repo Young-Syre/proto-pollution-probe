@@ -1,5 +1,5 @@
 import { readdirSync, statSync } from 'node:fs';
-import { extname, join, relative, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 export const ANALYSED_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.mts', '.cts']);
 
@@ -118,6 +118,51 @@ export function looksGenerated(source: string): boolean {
  */
 export function displayPath(path: string, base: string): string {
   const rel = relative(base, path);
-  const chosen = rel === '' || rel.startsWith('..') ? path : rel;
+  // Never the absolute path. It used to be the fallback whenever `relative`
+  // returned something starting with `..` -- which is every scan of a path
+  // outside the working directory -- so a SARIF file bound for a pull request
+  // carried the layout of the machine that produced it. A relative path with
+  // `..` in it says strictly less; a bare basename is the last resort, for the
+  // case where the scanned path *is* the base.
+  const chosen = rel === '' ? basename(path) : rel;
   return sep === '/' ? chosen : chosen.split(sep).join('/');
+}
+
+/**
+ * The directory that reported paths are relative to.
+ *
+ * `process.cwd()` when every scanned path is inside it, which is the ordinary
+ * case: `probe src` keeps reporting `src/a.js`. When a path lies outside the
+ * working directory the common ancestor of the scanned paths is used instead,
+ * so the report stays relative to something rather than falling back to an
+ * absolute path.
+ */
+export function scanBase(paths: readonly string[], cwd: string = process.cwd()): string {
+  const resolved = paths.map((p) => resolve(cwd, p));
+  if (resolved.length === 0) return cwd;
+  const inside = (p: string): boolean => {
+    const rel = relative(cwd, p);
+    return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+  };
+  if (resolved.every(inside)) return cwd;
+
+  // The common ancestor. A file contributes its directory, since a file cannot
+  // be the root that other files are reported against.
+  const parts = resolved.map((p) => (isDirectory(p) ? p : dirname(p)).split(sep));
+  let common = parts[0] ?? [];
+  for (const candidate of parts.slice(1)) {
+    let i = 0;
+    while (i < common.length && i < candidate.length && common[i] === candidate[i]) i += 1;
+    common = common.slice(0, i);
+  }
+  const joined = common.join(sep);
+  return joined === '' ? sep : joined;
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
 }

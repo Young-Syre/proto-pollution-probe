@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { analysePaths } from './analyse.js';
 import { buildCorpusReport, renderCorpusText } from './corpus.js';
-import { discoverFiles, displayPath } from './discover.js';
+import { discoverFiles, displayPath, scanBase } from './discover.js';
 import { renderJson, renderText, summaryLine } from './report.js';
 import { renderSarif } from './sarif.js';
 import { RULES } from './rules.js';
@@ -235,7 +235,7 @@ export function run(argv: string[]): number {
   const { options } = parsed;
 
   const discovered: string[] = [];
-  const base = options.corpus ? (options.paths[0] as string) : process.cwd();
+  const base = options.corpus ? (options.paths[0] as string) : scanBase(options.paths);
   for (const path of options.paths) {
     discovered.push(
       ...discoverFiles(path, {
